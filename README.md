@@ -25,7 +25,7 @@ While many Large Language Model (LLMs) services offer structured output capabili
 - Fix: MCP hosts (e.g. Codex CLI) failed to load the server because two non-JSON lines were written to stdout before the JSON-RPC stream. All diagnostics now go to stderr (or the log file when `--log=on`), and the FastMCP / pydantic-ai banners are suppressed.
 - Fix: Tool calls failed with `'AgentRunResult' object has no attribute 'data'` under current pydantic-ai. The server now targets the pydantic-ai 2.x API.
 - Fix: Importing the server (and `--help`) no longer requires `OPENAI_API_KEY`. A missing key is reported as an explicit tool-call error instead of an import-time crash.
-- Docs: Removed the Smithery badge and install instructions; the Smithery listing for this server is no longer reachable (404).
+- Change: Removed the Smithery integration (badge, install instructions, `smithery.yaml`, and the Smithery-generated Dockerfile); the Smithery listing for this server is no longer reachable (404).
 - Change: Dependencies are pinned with upper bounds (`fastmcp>=4,<5`, `pydantic-ai>=2,<3`, `spacy>=3.8,<3.9`, ...) so a fresh `uvx` / `pipx run` resolves reproducibly. Python 3.10+ is required.
 
 ### v0.3.2
