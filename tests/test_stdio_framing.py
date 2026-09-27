@@ -31,12 +31,26 @@ def _env_without_key(**extra):
 
 
 def _run_session(args, messages, env, timeout=60):
-    """Start the server, send `messages`, close stdin, and collect stdout/stderr to EOF."""
+    """Start the server, send `messages`, close stdin, and collect stdout/stderr to EOF.
+
+    A watchdog kills the server after `timeout` seconds so that a server which
+    stays alive without answering (or never exits after EOF) fails the test
+    instead of hanging the suite; the caller sees a nonzero return code.
+    """
     proc = subprocess.Popen(
         [sys.executable, "-m", "kv_extractor_mcp_server", *args],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, env=env,
     )
+    timed_out = threading.Event()
+
+    def _kill():
+        timed_out.set()
+        proc.kill()
+
+    watchdog = threading.Timer(timeout, _kill)
+    watchdog.daemon = True
+    watchdog.start()
     stderr_lines = []
     t = threading.Thread(target=lambda: stderr_lines.extend(proc.stderr), daemon=True)
     t.start()
@@ -58,8 +72,12 @@ def _run_session(args, messages, env, timeout=60):
         if seen == expected:
             proc.stdin.close()
     stdout_lines.extend(l.rstrip("\n") for l in proc.stdout)
-    proc.wait(timeout=timeout)
+    proc.wait()
+    watchdog.cancel()
     t.join(5)
+    assert not timed_out.is_set(), (
+        f"server did not answer/exit within {timeout}s; stdout={stdout_lines} stderr={stderr_lines}"
+    )
     return proc.returncode, stdout_lines, stderr_lines
 
 
@@ -91,6 +109,7 @@ def test_help_exits_zero_without_api_key():
 def test_stdout_carries_only_jsonrpc(tmp_path, log_mode):
     args = ["--log=off"] if log_mode == "off" else ["--log=on", f"--logfile={tmp_path / 'server.log'}"]
     rc, out, err = _run_session(args, [INIT, INITIALIZED, TOOLS_LIST], _env_without_key())
+    assert rc == 0, f"server exited with {rc}; stderr={err}"
     _assert_stdout_is_jsonrpc(out)
     responses = {json.loads(l)["id"]: json.loads(l) for l in out if l.strip()}
     assert set(responses) == {1, 2}
@@ -104,6 +123,7 @@ def test_tool_call_without_api_key_fails_closed():
     call = {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": {"name": "extract_json", "arguments": {"input_text": "Price: 100 JPY"}}}
     rc, out, err = _run_session(["--log=off"], [INIT, INITIALIZED, TOOLS_LIST, call], _env_without_key())
+    assert rc == 0, f"server exited with {rc}; stderr={err}"
     _assert_stdout_is_jsonrpc(out)
     resp = next(json.loads(l) for l in out if l.strip() and json.loads(l).get("id") == 3)
     payload = resp["result"]["structuredContent"]
