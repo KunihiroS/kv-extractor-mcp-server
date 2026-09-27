@@ -2,7 +2,7 @@
 
 [![smithery badge](https://smithery.ai/badge/@KunihiroS/kv-extractor-mcp-server)](https://smithery.ai/server/@KunihiroS/kv-extractor-mcp-server)
 
-Version: 0.3.2
+Version: 0.3.3
 
 This MCP server extracts key-value pairs from arbitrary, noisy, or unstructured text using LLMs (GPT-4.1-mini) and pydantic-ai. 
 It ensures type safety and supports multiple output formats (JSON, YAML, TOML). The server is robust to any input and always attempts to structure data as much as possible, however, perfect extraction is **not guaranteed**.
@@ -22,6 +22,12 @@ While many Large Language Model (LLMs) services offer structured output capabili
 ---
 
 ## Release Notes
+
+### v0.3.3
+- Fix: MCP hosts (e.g. Codex CLI) failed to load the server because two non-JSON lines were written to stdout before the JSON-RPC stream. All diagnostics now go to stderr (or the log file when `--log=on`), and the FastMCP / pydantic-ai banners are suppressed.
+- Fix: Tool calls failed with `'AgentRunResult' object has no attribute 'data'` under current pydantic-ai. The server now targets the pydantic-ai 2.x API.
+- Fix: Importing the server (and `--help`) no longer requires `OPENAI_API_KEY`. A missing key is reported as an explicit tool-call error instead of an import-time crash.
+- Change: Dependencies are pinned with upper bounds (`fastmcp>=4,<5`, `pydantic-ai>=2,<3`, `spacy>=3.8,<3.9`, ...) so a fresh `uvx` / `pipx run` resolves reproducibly. Python 3.10+ is required.
 
 ### v0.3.2
 - Fix: FastMCP caused error.
@@ -276,8 +282,8 @@ npx -y @smithery/cli install @KunihiroS/kv-extractor-mcp-server --client claude
 ```
 
 ### Requirements
-- Python 3.9+
-- API key for OpenAI models (set in `settings.json` under `env`)
+- Python 3.10+
+- API key for OpenAI models (set in the MCP host configuration under `env`). The server starts and lists its tools without the key, but every tool call returns `{"success": false, "error": "OPENAI_API_KEY is not set. ..."}` until it is provided.
 
 ### Running the Server
 
@@ -305,6 +311,16 @@ When running this MCP Server, you **must explicitly specify the log output mode 
 }
 ```
 
+### Example: Codex CLI (`~/.codex/config.toml`, via `uvx`)
+```toml
+[mcp_servers.kv-extractor-mcp-server]
+command = "uvx"
+args = ["kv-extractor-mcp-server==0.3.3", "--log=off"]
+
+[mcp_servers.kv-extractor-mcp-server.env]
+OPENAI_API_KEY = "{apikey}"
+```
+
 ### Example: Logging Enabled (absolute log file path required)
 ```json
 "kv-extractor-mcp-server": {
@@ -319,6 +335,7 @@ When running this MCP Server, you **must explicitly specify the log output mode 
 > **Note:**
 > - When logging is enabled, logs are written **only** to the specified absolute file path. Relative paths or omission of `--logfile` will cause an error.
 > - When logging is disabled, no logs are output.
+> - stdout is reserved for the MCP JSON-RPC stream. Diagnostics (startup messages, the log stream when `--log=on`) are written to stderr, so they never break the MCP host's transport.
 > - If the required arguments are missing or invalid, the server will not start and will print an error message.
 > - The log file must be accessible and writable by the MCP Server process.
 > - If you have trouble to run this server, it may be due to caching older version of kv-extractor-mcp-server. Please try to run it with the latest version (set `x.y.z` to the latest version) of kv-extractor-mcp-server by the below setting.

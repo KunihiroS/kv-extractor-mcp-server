@@ -18,7 +18,7 @@ def main():
     
     if logger and logger.handlers:
         logger.info("MCP Server starting up from __main__.py...")
-    server.run()
+    server.run(show_banner=False)
 
 if __name__ == "__main__":
     main()
