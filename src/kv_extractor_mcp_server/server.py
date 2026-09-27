@@ -1,5 +1,3 @@
-print("RUNNING LATEST SERVER.PY")
-
 from fastmcp import FastMCP
 from pydantic_ai import Agent
 from typing import Any, Dict, List, Union
@@ -12,10 +10,16 @@ import traceback
 import os
 import spacy
 from spacy.util import is_package
-from spacy.cli import download as spacy_download
 from langdetect import detect
 import sys
 import argparse
+import importlib
+import importlib.util
+import shutil
+import subprocess
+
+# MCP stdio transport: stdout carries JSON-RPC only. Every diagnostic line in this
+# module goes to stderr (or the log file); never print() to stdout.
 
 # --- Logging Setup ---
 logger = logging.getLogger("kv-extractor-mcp-server")
@@ -50,8 +54,8 @@ def setup_logging(log: str, logfile: str):
             file_handler.setFormatter(formatter)
             root_logger.addHandler(file_handler)
 
-            # Also add StreamHandler (stdout)
-            stream_handler = logging.StreamHandler(sys.stdout)
+            # Also add StreamHandler (stderr; stdout is reserved for JSON-RPC)
+            stream_handler = logging.StreamHandler(sys.stderr)
             stream_handler.setLevel(logging.DEBUG)
             stream_handler.setFormatter(formatter)
             root_logger.addHandler(stream_handler)
@@ -68,11 +72,11 @@ def setup_logging(log: str, logfile: str):
             specific_logger.propagate = False
 
             specific_logger.debug(f"=== MCP Server log initialized: {logfile} ===")
-            print(f"[INFO] MCP Server log initialized: {logfile}")
+            print(f"[INFO] MCP Server log initialized: {logfile}", file=sys.stderr)
             if os.path.exists(logfile):
-                print(f"[INFO] Log file created: {logfile}")
+                print(f"[INFO] Log file created: {logfile}", file=sys.stderr)
             else:
-                print(f"[WARN] Log file NOT created: {logfile}")
+                print(f"[WARN] Log file NOT created: {logfile}", file=sys.stderr)
 
             # Return the logger
             return specific_logger
@@ -82,7 +86,7 @@ def setup_logging(log: str, logfile: str):
     elif log == "off":
         # Completely disable logging functionality
         logging.disable(logging.CRITICAL)
-        print("[INFO] Logging disabled (--log=off)")
+        print("[INFO] Logging disabled (--log=off)", file=sys.stderr)
         return None
     else:
         print("[FATAL] --log must be 'on' or 'off'", file=sys.stderr)
@@ -99,10 +103,31 @@ def parse_args():
         sys.exit(1)
     return args
 
-# --- Main Processing Agent (lightweight model) ---
-agent_main = Agent('openai:gpt-4.1-mini')
-# Evaluation agent (high-precision model)
-agent_eval = Agent('openai:gpt-4.1')
+# --- LLM Agents ---
+# Main processing agent (lightweight model) and evaluation agent (high-precision model).
+# They are created lazily on the first tool call so that importing this module,
+# `--help`, and MCP initialize / tools/list all work without OPENAI_API_KEY.
+MAIN_MODEL = 'openai:gpt-4.1-mini'
+EVAL_MODEL = 'openai:gpt-4.1'
+_agents: Dict[str, Agent] = {}
+
+
+class MissingAPIKeyError(RuntimeError):
+    """Raised when a tool is called but no OpenAI API key is configured."""
+
+
+def get_agents():
+    """Return (agent_main, agent_eval), creating them on first use."""
+    if not _agents:
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise MissingAPIKeyError(
+                "OPENAI_API_KEY is not set. Provide it in the MCP host configuration (env) for this server."
+            )
+        # pydantic-ai prints a banner to stderr on first run; keep the stream quiet.
+        os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
+        _agents["main"] = Agent(MAIN_MODEL)
+        _agents["eval"] = Agent(EVAL_MODEL)
+    return _agents["main"], _agents["eval"]
 
 # --- Multilingual Support: spaCy NER Preprocessing (Step 0) ---
 LANG_MODEL_MAP = {
@@ -111,6 +136,56 @@ LANG_MODEL_MAP = {
     'zh-cn': 'zh_core_web_sm',
     'zh-tw': 'zh_core_web_sm',
 }
+
+def _spacy_model_install_command(model_name: str) -> List[str]:
+    """Build the installer command for a spaCy pipeline package.
+
+    `spacy.cli.download` is not used because (a) when the interpreter has no pip
+    (e.g. a `uvx` environment) it falls back to a bare `uv pip install`, which
+    targets whatever virtualenv `uv` discovers from the MCP host's working
+    directory instead of this interpreter, and (b) its failures call sys.exit(),
+    which would terminate the MCP server from inside a tool call.
+    """
+    from spacy import about
+    from spacy.cli.download import get_compatibility, get_model_filename, get_version
+
+    try:
+        version = get_version(model_name, get_compatibility())
+    except SystemExit as e:  # spaCy reports resolution failures via sys.exit()
+        raise RuntimeError(
+            f"Could not resolve a spaCy model compatible with spaCy {spacy.__version__} for '{model_name}'"
+        ) from e
+    url = about.__download_url__.rstrip("/") + "/" + get_model_filename(model_name, version)
+    if importlib.util.find_spec("pip") is not None:
+        return [sys.executable, "-m", "pip", "install", url]
+    uv = shutil.which("uv")
+    if uv:
+        return [uv, "pip", "install", "--python", sys.executable, url]
+    raise RuntimeError(
+        f"Cannot install spaCy model '{model_name}': neither pip nor uv is available. "
+        f"Install it manually into {sys.executable} from {url}"
+    )
+
+
+def _install_spacy_model(model_name: str) -> None:
+    """Install a spaCy pipeline package into this interpreter's environment.
+
+    Installer output is captured and forwarded to stderr: on the MCP stdio
+    transport stdout must carry JSON-RPC only.
+    """
+    cmd = _spacy_model_install_command(model_name)
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=os.environ.copy())
+    if proc.stdout:
+        sys.stderr.write(proc.stdout)
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+    sys.stderr.flush()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Installing spaCy model '{model_name}' failed (exit {proc.returncode})")
+    # The package was added to site-packages after startup; drop the import
+    # system's cached directory listings so spacy.load() can find it.
+    importlib.invalidate_caches()
+
 
 def get_spacy_model_for_text(text: str):
     # 1. Language detection
@@ -123,7 +198,7 @@ def get_spacy_model_for_text(text: str):
     model_name = LANG_MODEL_MAP[lang]
     # 2. Check and install model if necessary
     if not is_package(model_name):
-        spacy_download(model_name)
+        _install_spacy_model(model_name)
     # 3. Load model
     return spacy.load(model_name), lang
 
@@ -410,7 +485,7 @@ Given the key-value pair and the expected type, normalize the value into the mos
     try:
         logging.debug(f"Attempting LLM normalization for key='{key}', value='{value}', type='{expected_type}'")
         result = await agent.run(prompt)
-        normalized_str = result.data.strip()
+        normalized_str = result.output.strip()
         logging.debug(f"LLM normalization raw result: '{normalized_str}'")
 
         # Attempt to parse the LLM output based on expected type
@@ -608,6 +683,11 @@ async def normalize_types_v2(kv_data: List[KVOut], agent_for_llm: Agent, lang: s
 # ------ Main Pipeline ------
 async def extract_kv_pipeline(input_text: str, output_format: str) -> Dict[str, Any]:
     try:
+        agent_main, agent_eval = get_agents()
+    except MissingAPIKeyError as e:
+        # Fail closed with an explicit, secret-free message instead of a traceback.
+        return {"success": False, "error": str(e)}
+    try:
         logging.debug(f"Starting extract_kv_pipeline with input_text: {input_text[:100]}... (truncated)")
         lang = detect(input_text)
         # Step 0: Preprocessing with spaCy (Named Entity Recognition)
@@ -616,31 +696,28 @@ async def extract_kv_pipeline(input_text: str, output_format: str) -> Dict[str, 
         kv_prompt = build_kv_extraction_prompt(input_text, spacy_phrases, lang)
         logging.debug(f"KV extraction prompt: {kv_prompt[:200]}... (truncated)")
         kv_lines = await agent_main.run(kv_prompt)
-        logging.debug(f"KV extraction result: {kv_lines.data[:200]}... (truncated)")
+        logging.debug(f"KV extraction result: {kv_lines.output[:200]}... (truncated)")
 
         # Step 2: Pass type annotation to LLM (as is)
-        type_prompt = build_type_annotation_prompt(kv_lines.data)
+        type_prompt = build_type_annotation_prompt(kv_lines.output)
         logging.debug(f"Type annotation prompt: {type_prompt[:200]}... (truncated)")
         typed_lines = await agent_main.run(type_prompt)
-        logging.debug(f"Type annotation result: {typed_lines.data[:200]}... (truncated)")
+        logging.debug(f"Type annotation result: {typed_lines.output[:200]}... (truncated)")
 
         # Step 3: Specialized evaluation for type annotation
-        eval_prompt = build_evaluation_prompt(typed_lines.data)
+        eval_prompt = build_evaluation_prompt(typed_lines.output)
         logging.debug(f"Evaluation prompt: {eval_prompt[:200]}... (truncated)")
         eval_result = await agent_eval.run(eval_prompt)
-        logging.debug(f"Evaluation result: {eval_result.data[:200]}... (truncated)")
+        logging.debug(f"Evaluation result: {eval_result.output[:200]}... (truncated)")
 
         # Use the evaluation result directly - it's either the corrected or unchanged list
         # Add minimal format check as a safety measure
-        if not any("->" in line for line in eval_result.data.splitlines()):
+        if not any("->" in line for line in eval_result.output.splitlines()):
             # If result doesn't contain expected format, fall back to original
             logging.warning("Evaluation result doesn't contain expected format, using original")
-            if hasattr(typed_lines, "data"):
-                typed_lines_for_parse = typed_lines.data
-            else:
-                typed_lines_for_parse = str(typed_lines)
+            typed_lines_for_parse = typed_lines.output
         else:
-            typed_lines_for_parse = eval_result.data
+            typed_lines_for_parse = eval_result.output
         logging.debug(f"Parsed lines for final step: {typed_lines_for_parse[:200]}... (truncated)")
 
         # Step 4: Formatting and type validation are fully delegated to pydantic-ai
@@ -789,7 +866,7 @@ def initialize_and_run_server():
         logger = setup_logging(args.log, args.logfile)
         if logger:
             logger.info("MCP Server starting up via entry point...")
-        server.run()
+        server.run(show_banner=False)
     except Exception as e:
         print(f"[FATAL] Error during server initialization: {e}", file=sys.stderr)
         traceback.print_exc()
@@ -798,5 +875,6 @@ def initialize_and_run_server():
 if __name__ == "__main__":
     args = parse_args()
     logger = setup_logging(args.log, args.logfile)
-    logger.info("MCP Server starting up...")
-    server.run()
+    if logger:
+        logger.info("MCP Server starting up...")
+    server.run(show_banner=False)
