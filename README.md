@@ -1,7 +1,5 @@
 # Flexible Key-Value Extracting MCP Server
 
-[![smithery badge](https://smithery.ai/badge/@KunihiroS/kv-extractor-mcp-server)](https://smithery.ai/server/@KunihiroS/kv-extractor-mcp-server)
-
 Version: 0.3.3
 
 This MCP server extracts key-value pairs from arbitrary, noisy, or unstructured text using LLMs (GPT-4.1-mini) and pydantic-ai. 
@@ -27,6 +25,7 @@ While many Large Language Model (LLMs) services offer structured output capabili
 - Fix: MCP hosts (e.g. Codex CLI) failed to load the server because two non-JSON lines were written to stdout before the JSON-RPC stream. All diagnostics now go to stderr (or the log file when `--log=on`), and the FastMCP / pydantic-ai banners are suppressed.
 - Fix: Tool calls failed with `'AgentRunResult' object has no attribute 'data'` under current pydantic-ai. The server now targets the pydantic-ai 2.x API.
 - Fix: Importing the server (and `--help`) no longer requires `OPENAI_API_KEY`. A missing key is reported as an explicit tool-call error instead of an import-time crash.
+- Docs: Removed the Smithery badge and install instructions; the Smithery listing for this server is no longer reachable (404).
 - Change: Dependencies are pinned with upper bounds (`fastmcp>=4,<5`, `pydantic-ai>=2,<3`, `spacy>=3.8,<3.9`, ...) so a fresh `uvx` / `pipx run` resolves reproducibly. Python 3.10+ is required.
 
 ### v0.3.2
@@ -272,14 +271,6 @@ addresses = '[{"city": "Tokyo", "zip": "160-0022"}, {"city": "Osaka", "zip": "53
   ```
 
 ## Usage
-
-### Installing via Smithery
-
-To install kv-extractor-mcp-server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@KunihiroS/kv-extractor-mcp-server):
-
-```bash
-npx -y @smithery/cli install @KunihiroS/kv-extractor-mcp-server --client claude
-```
 
 ### Requirements
 - Python 3.10+
